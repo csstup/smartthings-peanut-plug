@@ -29,6 +29,10 @@
  *  2019-10-03 - v01.09 two decimal points for values
  *  2020-02-23 - v01.10 fix energy value not update issues
  *  2020-03-31 - v01.11 fix decimal place display problem in some devices
+ *  
+ *  2020-12-13 - v01.20 added units to voltage, current and power events.  
+ *                      added logging for configuration reports
+ *                      
  */
 
 import physicalgraph.zigbee.zcl.DataType
@@ -36,20 +40,24 @@ import physicalgraph.zigbee.zcl.DataType
 metadata {
   definition (name: "Peanut Plug", namespace: "pakmanwg", author: "pakmanw@sbcglobal.net", ocfDeviceType: "oic.d.switch",
     vid: "generic-switch-power-energy") {
-    capability "Energy Meter"
+    capability "Energy Meter"           // Attribute: energy
     capability "Actuator"
     capability "Switch"
-    capability "Power Meter"
-    capability "Polling"
+    capability "Power Meter"            // Attribute: power
+    // capability "Polling"             // CSS note: we shouldn't support polling, as with zigbee powered devices its not needed.
     capability "Refresh"
     capability "Configuration"
     capability "Sensor"
     capability "Light"
     capability "Health Check"
-    capability "Voltage Measurement"
+    capability "Voltage Measurement"    // Attribute: voltage
 
-    attribute "current", "number"
+    attribute "current", "number"  // In A.  Not serviced by Power Meter
     attribute "switchStatus", "string"
+    
+    attribute "voltageReportingConfig", "string"
+    attribute "currentReportingConfig", "string"
+    attribute "powerReportingConfig", "string"
 
     command "reset"
 
@@ -103,6 +111,11 @@ metadata {
     // }
     input "energyPrice", "number", title: "\$/kWh Cost:", description: "Electric Cost per Kwh in cent", range: "0..*", defaultValue: 15
     input "inactivePower", "decimal", title: "Reporting inactive when power is less than or equal to:", range: "0..*", defaultValue: 0
+    
+    input name: "powerReport", type: "bool", title: "Report Power?", description: "Configure power (wattage) reporting?", required: false, displayDuringSetup: true, defaultValue: true
+    input name: "energyReport", type: "bool", title: "Report Energy?", description: "Configure energy reporting?", required: false, displayDuringSetup: true, defaultValue: true
+    input name: "voltageReport", type: "bool", title: "Report Voltage?", description: "Configure voltage (VAC) reporting?", required: false, displayDuringSetup: true, defaultValue: true
+    input name: "currentReport", type: "bool", title: "Report Current?", description: "Configure current (A) reporting?", required: false, displayDuringSetup: true, defaultValue: true
     // ["Power", "Energy", "Voltage", "Current"].each {
     //   getBoolInput("display${it}", "Display ${it} Activity", true)
     // }
@@ -142,24 +155,35 @@ def on() {
 }
 
 def refresh() {
+  log.debug "refresh()"
   Integer reportIntervalMinutes = 5
   setRetainState() +
+  zigbee.readReportingConfiguration(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x050B) + // Query the electricMeasurementPowerConfig()
+  zigbee.readReportingConfiguration(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x0505) + // Query the voltageMeasurementConfig()
+  zigbee.readReportingConfiguration(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x0508) + // Query the currentMeasurementConfig()
   zigbee.onOffRefresh() +
-  zigbee.simpleMeteringPowerRefresh() +
+  // zigbee.simpleMeteringPowerRefresh() +                                     // This is the SIMPLE_METERING_CLUSTER (0x0702) which the Peanut Plug DOES NOT SUPPORT.
   zigbee.electricMeasurementPowerRefresh() +
   zigbee.onOffConfig(1, 600) +
-  zigbee.simpleMeteringPowerConfig(1, 600) +
-  zigbee.electricMeasurementPowerConfig(1, 600) +
+  // zigbee.simpleMeteringPowerConfig(1, 600) +                                // This is the SIMPLE_METERING_CLUSTER (0x0702) which the Peanut Plug DOES NOT SUPPORT.
+  
+  // zigbee.electricMeasurementPowerConfig(1, 600) +  
+  zigbee.electricMeasurementPowerConfig(60, 600, 0x10) +                   // electricMeasurementPowerConfig(minReportTime=1, maxReportTime=600, reportableChange=0x0005)  Measured in watts. 
   voltageMeasurementRefresh() +
-  voltageMeasurementConfig(reportIntervalMinutes * 60, 600) +
+  // voltageMeasurementConfig(reportIntervalMinutes * 60, 600) +  
+  voltageMeasurementConfig(reportIntervalMinutes * 60, 600, 0x30) +
   currentMeasurementRefresh() +
   currentMeasurementConfig(reportIntervalMinutes * 60, 600) +
-  zigbee.readAttribute(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x0600) +
-  zigbee.readAttribute(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x0601) +
-  zigbee.readAttribute(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x0602) +
-  zigbee.readAttribute(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x0603) +
-  zigbee.readAttribute(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x0604) +
-  zigbee.readAttribute(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x0605)
+  // Query the basic attributes.  0x1, 0x3, 0x5, 0x6 and 0x4000 are not supported.   0x7 returns "unknown"
+  zigbee.readAttribute(0x0000, 0x0000) +  // ZCLVersion;
+  zigbee.readAttribute(0x0000, 0x0002) +  // StackVersion
+  zigbee.readAttribute(0x0000, 0x0004) +  // Manufacturer Name
+  zigbee.readAttribute(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x0600) +    // ACVoltageMultiplier
+  zigbee.readAttribute(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x0601) +    // ACVoltageDivisor
+  zigbee.readAttribute(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x0602) +    // ACCurrentMultiplier
+  zigbee.readAttribute(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x0603) +    // ACCurrentDivisor
+  zigbee.readAttribute(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x0604) +    // ACPowerMultiplier
+  zigbee.readAttribute(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x0605)      // ACPowerDivisor
 }
 
 def currentMeasurementConfig(minReportTime=1, maxReportTime=600, reportableChange=0x0030) {
@@ -202,8 +226,10 @@ def getPowerMultiplier() {
   }
 }
 
+// installed() runs just after a sensor is paired using the "Add a Thing" method in the SmartThings mobile app
+// configure() runs after installed() when a sensor is paired
 def configure() {
-  log.debug "in configure()"
+  log.debug "configure()"
   return configureHealthCheck() + setRetainState()
 }
 
@@ -214,7 +240,7 @@ def configureHealthCheck() {
 }
 
 def updated() {
-  log.debug "in updated()"
+  log.debug "updated()"
   // updated() doesn't have it's return value processed as hub commands, so we have to send them explicitly
   def cmds = configureHealthCheck() + setRetainState()
   cmds.each{ sendHubCommand(new physicalgraph.device.HubAction(it)) }
@@ -467,6 +493,10 @@ private safeToDec(val, defaultVal=0) {
   return "${val}"?.isBigDecimal() ? "${val}".toBigDecimal() : defaultVal
 }
 
+private roundOnePlace(val) {
+  return Math.round(safeToDec(val) * 10) / 10
+}
+
 private roundTwoPlaces(val) {
   return Math.round(safeToDec(val) * 100) / 100
 }
@@ -487,12 +517,15 @@ private isDuplicateCommand(lastExecuted, allowedMil) {
 
 def parse(String description) {
 
-  // log.debug "description is $description"
+  // log.debug "parse() description: $description"
   def event = zigbee.getEvent(description)
   if (event) {
     if (event.name == "power") {
       def powerValue = (event.value as Integer) * getPowerMultiplier()
-      sendEvent(name: "power", value: (String.format("%.2f", powerValue)))
+      def formattedPowerValue = (String.format("%.2f", powerValue))
+      sendEvent(name: "power", value: formattedPowerValue, unit: "W")
+      log.info "power ${formattedPowerValue}W"
+      
       def time = (now() - state.time) / 3600000 / 1000
       state.time = now()
       // log.debug "powerValues is $state.powerValue"
@@ -519,12 +552,26 @@ def parse(String description) {
       sendEvent(name: "switchStatus", value: switchStatusS, displayed: false)
       // refreshHistory
     } else {
+      log.trace "${description} event: ${event}"
       sendEvent(event)
     }
   } else if (description?.startsWith("read attr -")) {
     def descMap = zigbee.parseDescriptionAsMap(description)
-    // log.debug "Desc Map: $descMap"
-    if (descMap.clusterInt == zigbee.ELECTRICAL_MEASUREMENT_CLUSTER) {
+    log.debug "read attr - Desc Map: $descMap"
+    if (descMap.clusterInt == zigbee.BASIC_CLUSTER) {
+      switch (descMap.attrInt) {
+      	case 0x0000:  // ZCLVersion
+        	log.info "ZCL version: ${descMap.value}"            // default 0x03
+            break
+        case 0x0002:  // Stack version
+            log.info "Stack version: ${descMap.value}"
+            break
+        case 0x0004:
+        	def name = parseAttributeText(descMap.value)
+            log.info "Manufacturer: ${name}"
+            break
+      }
+    } else if (descMap.clusterInt == zigbee.ELECTRICAL_MEASUREMENT_CLUSTER) {
       def intVal = Integer.parseInt(descMap.value,16)
       if (descMap.attrInt == 0x0600) {
         // log.debug "ACVoltageMultiplier $intVal"
@@ -544,23 +591,143 @@ def parse(String description) {
       } else if (descMap.attrInt == 0x0605) {
         // log.debug "ACPowerDivisor $intVal"
         state.powerDivisor = intVal
-      } else if (descMap.attrInt == 0x0505) {
-        def voltageValue = roundTwoPlaces(intVal * getVoltageMultiplier())
-        // log.debug "Voltage ${voltageValue}"
-        state.voltage = $voltageValue
-        sendEvent(name: "voltage", value: (String.format("%.2f", voltageValue)))
-      } else if (descMap.attrInt == 0x0508) {
+      } else if (descMap.attrInt == 0x0505) {   // AC RMS Voltage (measured in Volts [VAC])
+        def voltageValue = roundOnePlace(intVal * getVoltageMultiplier())
+        log.info "Voltage ${voltageValue}VAC"
+        // Save the last voltage
+        // state.voltage = $voltageValue
+        sendEvent(name: "voltage", value: (String.format("%.1f", voltageValue)), unit: "VAC")
+      } else if (descMap.attrInt == 0x0508) {  // AC RMS Current (measured in Amps [A])
         def currentValue = roundTwoPlaces(intVal * getCurrentMultiplier())
-        // log.debug "Current ${currentValue}"
-        state.current = $currentValue
-        sendEvent(name: "current", value: (String.format("%.2f", currentValue)))
+        log.info "Current ${currentValue}A"
+        // state.current = $currentValue
+        sendEvent(name: "current", value: (String.format("%.2f", currentValue)), unit: "A")
       }
     } else {
       log.warn "Not an electrical measurement"
     }
   } else {
-    log.warn "DID NOT PARSE MESSAGE for description : $description"
-    log.debug zigbee.parseDescriptionAsMap(description)
+  	// Try and parse
+    def descMap = zigbee.parseDescriptionAsMap(description)
+    
+    def processed = false
+    log.debug descMap
+    
+    switch (descMap?.command) {
+        case "00": // read attribute
+            def attr = descMap.data[1] + descMap.data[0]
+            log.warn "READ ATTRIBUTE request for cluster 0x${descMap.clusterId}, attribute ${attr} - IGNORED"
+            // TODO: respond!
+            break
+        case "01": // Read attribute response. We generally only get here on a read attribute error, otherwise the device returns a "read attr" prefixed message.
+            def attr  = descMap.data[1] + descMap.data[0]
+            def status = descMap.data[2]
+            if (status == "00") { 
+                log.debug "Cluster 0x${descMap.clusterId} read attribute 0x${attr} response SUCCESS."
+            } else {
+                String statusDesc = zigbeeStatusCodeToString(Integer.parseInt(status, 16))
+                log.error "Cluster 0x${descMap.clusterId} read attribute 0x${attr} response error ${statusDesc} [0x${status}], data: ${descMap.data}"
+            }
+            processed = true
+            break
+    	case "04": // Write attribute response
+            String status =  descMap.data[0]
+            if (status == "00") {  // Success
+            	log.debug "Cluster 0x${descMap.clusterId} write attribute response SUCCESS."
+            } else {  // some other failure
+                String statusDesc = zigbeeStatusCodeToString(Integer.parseInt(status, 16))
+            	log.error "Cluster 0x${descMap.clusterId} write attribute response error ${statusDesc} [0x${status}], data: ${descMap.data}"
+            }
+            processed = true
+            break
+    	case "07": // Configuration Response
+            String status =  descMap.data[0]
+            if (status == "00") {  // Success
+            	log.debug "Cluster 0x${descMap.clusterId} configuration response SUCCESS."
+            } else {  // some other failure
+            	log.error "Cluster 0x${descMap.clusterId} configuration response error ${status}, data: ${descMap.data}"
+            }
+            processed = true
+            break
+    	case "09": // Read Reporting Configuration Response
+            def status = descMap.data[0]
+            // def statusDesc = zigbeeStatusCodeToString(Integer.parseInt(status, 16))
+            def direction = descMap.data[1]
+            def attr  = descMap.data[3] + descMap.data[2]
+            if (status == "00") { 
+                def datatype  = descMap.data[4]
+                def min   = Integer.parseInt(descMap.data[6] + descMap.data[5], 16)  // convert to integer seconds
+                def max   = Integer.parseInt(descMap.data[8] + descMap.data[7], 16)  // convert to integer seconds
+                def delta = Integer.parseInt(descMap.data[10] + descMap.data[9], 16) // convert to a delta value
+                log.debug "Read Reporting Configuration clusterId: ${descMap.clusterId} status:${statusDesc} (0x${status}) direction: ${direction} attr: ${attr} datatype: ${datatype} min: ${min}s max: ${max}s delta: ${delta}"
+                sendReportingConfigEvent(descMap.clusterId, attr, min, max, delta) 
+            } else {
+                log.error "Read Reporting Configuration clusterId: ${descMap.clusterId} status:${statusDesc} (0x${status}) direction: ${direction} attr: ${attr}"
+            }
+            processed = true
+            break
+    }
+    if (!processed) {
+    	log.warn "DID NOT PARSE MESSAGE for description : $description -> ${descMap}"
+    }
   }
 }
 
+private sendReportingConfigEvent(clusterId, attr, min, max, delta) {
+
+	def eventName
+    def adjustedDelta
+    def deltaUnit
+    
+    log.trace "sendReportingConfigEvent(${clusterId}, ${attr}, ${min}, ${max}, ${delta})"
+	
+    // TODO:
+    // Fix so clusters are ints.  attributes too
+    if (clusterId == "0B04") { // zigbee.ELECTRICAL_MEASUREMENT_CLUSTER) {
+        if (attr == "0505") {  // voltage
+        	eventName = "voltageReportingConfig"
+            deltaUnit = "VAC"
+            adjustedDelta = roundOnePlace(delta * getVoltageMultiplier())
+        } else if (attr == "0508") {  // current
+        	eventName = "currentReportingConfig"
+            deltaUnit = "A"  // measured in amps
+            adjustedDelta = delta * getCurrentMultiplier()
+        } else if (attr == "050B") {
+        	eventName = "powerReportingConfig"
+            deltaUnit = "W"  // measured in watts
+            adjustedDelta = delta * getPowerMultiplier()
+        }
+    }
+    
+    if (eventName) {
+    	def eventDesc = "(${min}s, ${max}s, ${delta} [${adjustedDelta}${deltaUnit}])"
+    	sendEvent(name: eventName, value: eventDesc)
+        log.trace "Sending event ${eventName} = ${eventDesc}"
+    }
+}
+
+String zigbeeStatusCodeToString(Integer codeInt) {
+    switch (codeInt) {
+        case 0x00: return "SUCCESS"
+        case 0x01: return "FAILURE"
+        case 0x81: return "UNSUPPORTED CLUSTER COMMAND"
+        case 0x82: return "UNSUPPORTED GENERAL COMMAND"
+        case 0x86: return "UNSUPPORTED ATTRIBUTE"
+        case 0xC3: return "UNSUPPORTED CLUSTER"
+    }
+    return "UNKNOWN"
+}
+
+private String parseAttributeText(value) {
+
+	String ret = ""
+    
+    // Parsing the model
+    for (int i = 0; i < value.length(); i+=2) {
+        def str = value.substring(i, i+2);
+        def NextChar = (char)Integer.parseInt(str, 16);
+        ret = ret + NextChar
+    }
+    
+    return ret
+}
