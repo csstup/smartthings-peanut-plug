@@ -32,7 +32,10 @@
  *  
  *  2020-12-13 - v01.20 added units to voltage, current and power events.  
  *                      added logging for configuration reports
- *                      
+ *      
+ * To reset the plug, press and hold the radio (small) button for 10 seconds.  The LED will flash RED once to indicate its reset.
+ * Put your hub into pairing mode and plug the Peanut back in.   It will start pairing.
+ * 
  */
 
 import physicalgraph.zigbee.zcl.DataType
@@ -40,17 +43,16 @@ import physicalgraph.zigbee.zcl.DataType
 metadata {
   definition (name: "Peanut Plug", namespace: "pakmanwg", author: "pakmanw@sbcglobal.net", ocfDeviceType: "oic.d.switch",
     vid: "generic-switch-power-energy") {
-    capability "Energy Meter"           // Attribute: energy
+    capability "Energy Meter"           // Attribute: energy (W over time - KWh)
     capability "Actuator"
     capability "Switch"
-    capability "Power Meter"            // Attribute: power
-    // capability "Polling"             // CSS note: we shouldn't support polling, as with zigbee powered devices its not needed.
+    capability "Power Meter"            // Attribute: power (instantanous W)
     capability "Refresh"
     capability "Configuration"
     capability "Sensor"
     capability "Light"
     capability "Health Check"
-    capability "Voltage Measurement"    // Attribute: voltage
+    capability "Voltage Measurement"    // Attribute: voltage  (VAC RMS)
 
     attribute "current", "number"  // In A.  Not serviced by Power Meter
     attribute "switchStatus", "string"
@@ -61,9 +63,9 @@ metadata {
 
     command "reset"
 
-    fingerprint profileId: "0104", inClusters: "0000, 0001, 0003, 0004, 0005, 0006, 0B04, 0B05",
-      outClusters: "0000, 0001, 0003, 0004, 0005, 0006, 0019, 0B04, 0B05",
-      manufacturer: "Securifi Ltd."
+    //fingerprint profileId: "0104", inClusters: "0000, 0001, 0003, 0004, 0005, 0006, 0B04, 0B05",
+    //  outClusters: "0000, 0001, 0003, 0004, 0005, 0006, 0019, 0B04, 0B05",
+    //  manufacturer: "Securifi Ltd."
   }
 
   // tile definitions
@@ -156,22 +158,24 @@ def on() {
 
 def refresh() {
   log.debug "refresh()"
+  
   Integer reportIntervalMinutes = 5
+  
+  // Build the refresh() commands
   setRetainState() +
   zigbee.readReportingConfiguration(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x050B) + // Query the electricMeasurementPowerConfig()
   zigbee.readReportingConfiguration(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x0505) + // Query the voltageMeasurementConfig()
   zigbee.readReportingConfiguration(zigbee.ELECTRICAL_MEASUREMENT_CLUSTER, 0x0508) + // Query the currentMeasurementConfig()
   zigbee.onOffRefresh() +
-  // zigbee.simpleMeteringPowerRefresh() +                                     // This is the SIMPLE_METERING_CLUSTER (0x0702) which the Peanut Plug DOES NOT SUPPORT.
   zigbee.electricMeasurementPowerRefresh() +
   zigbee.onOffConfig(1, 600) +
-  // zigbee.simpleMeteringPowerConfig(1, 600) +                                // This is the SIMPLE_METERING_CLUSTER (0x0702) which the Peanut Plug DOES NOT SUPPORT.
   
-  // zigbee.electricMeasurementPowerConfig(1, 600) +  
-  zigbee.electricMeasurementPowerConfig(60, 600, 0x10) +                   // electricMeasurementPowerConfig(minReportTime=1, maxReportTime=600, reportableChange=0x0005)  Measured in watts. 
+  zigbee.electricMeasurementPowerConfig(60, 600, 0x10) +     // electricMeasurementPowerConfig(minReportTime=1, maxReportTime=600, reportableChange=0x0005)  Measured in scaled watts. 
+  
   voltageMeasurementRefresh() +
   // voltageMeasurementConfig(reportIntervalMinutes * 60, 600) +  
-  voltageMeasurementConfig(reportIntervalMinutes * 60, 600, 0x30) +
+  voltageMeasurementConfig(reportIntervalMinutes * 60, 600, 0x30) +   // Measured in scaled volts.
+  
   currentMeasurementRefresh() +
   currentMeasurementConfig(reportIntervalMinutes * 60, 600) +
   // Query the basic attributes.  0x1, 0x3, 0x5, 0x6 and 0x4000 are not supported.   0x7 returns "unknown"
@@ -256,9 +260,9 @@ def setRetainState() {
     if (retainState == null) {
       log.warn "retainState is null, defaulting to 'true' behavior"
     }
-    return zigbee.writeAttribute(0x0003, 0x0000, DataType.UINT16, 0x0000)
+    return zigbee.writeAttribute(0x0003, 0x0000, DataType.UINT16, 0x0000)  // Yes retain state
   } else {
-    return zigbee.writeAttribute(0x0003, 0x0000, DataType.UINT16, 0x1111)
+    return zigbee.writeAttribute(0x0003, 0x0000, DataType.UINT16, 0x1111)  // No, start in the off position
   }
 }
 
@@ -539,6 +543,7 @@ def parse(String description) {
       sendEvent(name: "energy", value: (String.format("%.2f", state.energyValue)))
       state.costValue = roundTwoPlaces(state.energyValue * localCostPerKwh / 100)
       sendEvent(name: "cost", value: (String.format("%.2f", state.costValue)))
+      
       if (inactivePowerSetting == null) {
         inactivePowerSetting = 0
       }
@@ -574,22 +579,22 @@ def parse(String description) {
     } else if (descMap.clusterInt == zigbee.ELECTRICAL_MEASUREMENT_CLUSTER) {
       def intVal = Integer.parseInt(descMap.value,16)
       if (descMap.attrInt == 0x0600) {
-        // log.debug "ACVoltageMultiplier $intVal"
+        // log.debug "ACVoltageMultiplier $intVal"  // VAC   val: 180
         state.voltageMultiplier = intVal
       } else if (descMap.attrInt == 0x0601) {
-        // log.debug "ACVoltageDivisor $intVal"
+        // log.debug "ACVoltageDivisor $intVal"     // val: 39321 (0x9999)
         state.voltageDivisor = intVal
       } else if (descMap.attrInt == 0x0602) {
-        // log.debug "ACCurrentMultiplier $intVal"
+        // log.debug "ACCurrentMultiplier $intVal"   // A    val: 72
         state.currentMultiplier = intVal
       } else if (descMap.attrInt == 0x0603) {
-        // log.debug "ACCurrentDivisor $intVal"
+        // log.debug "ACCurrentDivisor $intVal"      // val: 39321 (0x9999)
         state.currentDivisor = intVal
       } else if (descMap.attrInt == 0x0604) {
-        // log.debug "ACPowerMultiplier $intVal"
+        // log.debug "ACPowerMultiplier $intVal"     // W   val: 10255
         state.powerMultiplier = intVal
       } else if (descMap.attrInt == 0x0605) {
-        // log.debug "ACPowerDivisor $intVal"
+        // log.debug "ACPowerDivisor $intVal"        // val: 39321 (0x9999)
         state.powerDivisor = intVal
       } else if (descMap.attrInt == 0x0505) {   // AC RMS Voltage (measured in Volts [VAC])
         def voltageValue = roundOnePlace(intVal * getVoltageMultiplier())
